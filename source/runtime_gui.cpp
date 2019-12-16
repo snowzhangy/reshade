@@ -453,16 +453,21 @@ void reshade::runtime::draw_ui()
 	auto &imgui_io = _imgui_context->IO;
 	imgui_io.DeltaTime = _last_frame_duration.count() * 1e-9f;
 	imgui_io.MouseDrawCursor = _show_menu;
+	imgui_io.MousePos.x = static_cast<float>(_input->mouse_position_x());
+	imgui_io.MousePos.y = static_cast<float>(_input->mouse_position_y());
 	imgui_io.DisplaySize.x = static_cast<float>(_width);
 	imgui_io.DisplaySize.y = static_cast<float>(_height);
 	imgui_io.Fonts->TexID = _imgui_font_atlas->impl.get();
 
-	// Scale mouse position in case render resolution does not match the window size
-	imgui_io.MousePos.x = _input->mouse_position_x() * (imgui_io.DisplaySize.x / _window_width);
-	imgui_io.MousePos.y = _input->mouse_position_y() * (imgui_io.DisplaySize.y / _window_height);
-
 	// Add wheel delta to the current absolute mouse wheel position
 	imgui_io.MouseWheel += _input->mouse_wheel_delta();
+
+	// Scale mouse position in case render resolution does not match the window size
+	if (_window_width != 0 && _window_height != 0)
+	{
+		imgui_io.MousePos.x *= imgui_io.DisplaySize.x / _window_width;
+		imgui_io.MousePos.y *= imgui_io.DisplaySize.y / _window_height;
+	}
 
 	// Update all the button states
 	imgui_io.KeyAlt = _input->is_key_down(0x12); // VK_MENU
@@ -739,9 +744,6 @@ void reshade::runtime::draw_ui()
 
 void reshade::runtime::draw_ui_home()
 {
-	if (!_effects_enabled)
-		ImGui::Text("Effects are disabled. Press '%s' to enable them again.", input::key_name(_effects_key_data).c_str());
-
 	const char *tutorial_text =
 		"Welcome! Since this is the first time you start ReShade, we'll go through a quick tutorial covering the most important features.\n\n"
 		"If you have difficulties reading this text, press the 'Ctrl' key and adjust the font size with your mouse wheel. "
@@ -788,11 +790,35 @@ void reshade::runtime::draw_ui_home()
 		return; // Cannot show techniques and variables while effects are loading, since they are being modified in other different threads during that time
 	}
 
+	if (!_effects_enabled)
+		ImGui::Text("Effects are disabled. Press '%s' to enable them again.", input::key_name(_effects_key_data).c_str());
+
+	if (!_last_reload_successful)
+	{
+		std::string error_message = "There were errors compiling the following shaders:";
+		for (const effect &effect : _effects)
+			if (!effect.compile_sucess)
+				error_message += ' ' + effect.source_file.filename().u8string() + ',';
+		error_message.pop_back();
+
+		// Make sure there are actually effects that failed to compile, since the last reload flag may not have been reset
+		if (error_message.size() > 50)
+		{
+			ImGui::TextColored(COLOR_RED, "%s", error_message.c_str());
+
+			ImGui::Spacing();
+		}
+		else
+		{
+			_last_reload_successful = true;
+		}
+	}
+
 	if (_tutorial_index > 1)
 	{
 		const bool show_clear_button = strcmp(_effect_filter, "Search") != 0 && _effect_filter[0] != '\0';
-		ImGui::PushItemWidth((_variable_editor_tabs ? -10.0f : -20.0f) * _font_size - (show_clear_button ? ImGui::GetFrameHeight() + _imgui_context->Style.ItemSpacing.x : 0));
 
+		ImGui::PushItemWidth((_variable_editor_tabs ? -10.0f : -20.0f) * _font_size - (show_clear_button ? ImGui::GetFrameHeight() + _imgui_context->Style.ItemSpacing.x : 0));
 		if (ImGui::InputText("##filter", _effect_filter, sizeof(_effect_filter), ImGuiInputTextFlags_AutoSelectAll))
 		{
 			_effects_expanded_state = 3;
@@ -817,7 +843,6 @@ void reshade::runtime::draw_ui_home()
 		{
 			strcpy_s(_effect_filter, "Search");
 		}
-
 		ImGui::PopItemWidth();
 
 		ImGui::SameLine();
@@ -1635,18 +1660,18 @@ void reshade::runtime::draw_code_editor()
 		std::ofstream(_editor_file, std::ios::trunc).write(text.c_str(), text.size());
 
 		// Reload effect file
-		_textures_loaded = false;
 		_reload_total_effects = 1;
 		_reload_remaining_effects = 1;
-		const std::filesystem::path source_file = _effects[_selected_effect].source_file;
 		unload_effect(_selected_effect);
-		load_effect(source_file, _selected_effect);
+		load_effect(_effects[_selected_effect].source_file, _selected_effect);
+
+		// Re-open current file so that errors are updated
+		open_file_in_code_editor(_selected_effect, _editor_file);
+
 		assert(_reload_remaining_effects == 0);
 
 		// Reloading an effect file invalidates all textures, but the statistics window may already have drawn references to those, so need to reset it
 		ImGui::FindWindowByName("Statistics")->DrawList->CmdBuffer.clear();
-
-		open_file_in_code_editor(_selected_effect, _editor_file);
 	}
 
 	// Select editor font
@@ -2203,8 +2228,9 @@ void reshade::runtime::draw_variable_editor()
 		}
 		ImGui::PopStyleVar();
 
-		bool category_is_closed = false;
+		bool category_closed = false;
 		std::string current_category;
+		auto modified_definition = _preset_preprocessor_definitions.end();
 
 		for (uniform &variable : _effects[effect_index].uniforms)
 		{
@@ -2228,16 +2254,16 @@ void reshade::runtime::draw_variable_editor()
 					if (!variable.annotation_as_int("ui_category_closed"))
 						flags |= ImGuiTreeNodeFlags_DefaultOpen;
 
-					category_is_closed = !ImGui::TreeNodeEx(category_label.c_str(), flags);
+					category_closed = !ImGui::TreeNodeEx(category_label.c_str(), flags);
 				}
 				else
 				{
-					category_is_closed = false;
+					category_closed = false;
 				}
 			}
 
 			// Skip rendering invisible items
-			if (category_is_closed)
+			if (category_closed)
 				continue;
 
 			// Add spacing before variable widget
@@ -2419,12 +2445,16 @@ void reshade::runtime::draw_variable_editor()
 						reload_effect = true;
 
 						if (preset_it != _preset_preprocessor_definitions.end())
+						{
 							*preset_it = definition.first + '=' + value;
+							modified_definition = preset_it;
+						}
 						else
+						{
 							_preset_preprocessor_definitions.push_back(definition.first + '=' + value);
+							modified_definition = _preset_preprocessor_definitions.end() - 1;
+						}
 					}
-
-					save_current_preset();
 				}
 
 				if (!reload_effect && // Cannot compare iterators if definitions were just modified above
@@ -2455,16 +2485,45 @@ void reshade::runtime::draw_variable_editor()
 
 		if (reload_effect)
 		{
+			save_current_preset();
+
+			const bool reload_successful_before = _last_reload_successful;
+
 			// Reload current effect file
-			_textures_loaded = false;
 			_reload_total_effects = 1;
 			_reload_remaining_effects = 1;
-			const std::filesystem::path source_path = _effects[effect_index].source_file;
 			unload_effect(effect_index);
-			load_effect(source_path, effect_index);
+			if (!load_effect(_effects[effect_index].source_file, effect_index) &&
+				modified_definition != _preset_preprocessor_definitions.end())
+			{
+				// The preprocessor definition that was just modified caused the shader to not compile, so reset to default and try again
+				_preset_preprocessor_definitions.erase(modified_definition);
+
+				_reload_total_effects = 1;
+				_reload_remaining_effects = 1;
+				unload_effect(effect_index);
+				if (load_effect(_effects[effect_index].source_file, effect_index))
+				{
+					_last_reload_successful = reload_successful_before;
+					ImGui::OpenPopup("##pperror"); // Notify the user about this
+				}
+
+				// Re-open file in editor so that errors are updated
+				if (_selected_effect == effect_index)
+					open_file_in_code_editor(_selected_effect, _editor_file);
+			}
+
 			assert(_reload_remaining_effects == 0);
+
+			// Reloading an effect file invalidates all textures, but the statistics window may already have drawn references to those, so need to reset it
 			ImGui::FindWindowByName("Statistics")->DrawList->CmdBuffer.clear();
 		}
+	}
+
+	if (ImGui::BeginPopup("##pperror"))
+	{
+		ImGui::TextColored(COLOR_RED, "The shader failed to compile after this change, so it was reverted back to the default.");
+		ImGui::EndPopup();
 	}
 
 	ImGui::PopItemWidth();
@@ -2507,7 +2566,7 @@ void reshade::runtime::draw_technique_editor()
 		std::string_view ui_label = technique.annotation_as_string("ui_label");
 		if (ui_label.empty() || !compile_success) ui_label = technique.name;
 		std::string label(ui_label.data(), ui_label.size());
-		label += " [" + effect.source_file.filename().u8string() + ']' + (!compile_success ? " (failed to compile)" : "");
+		label += " [" + effect.source_file.filename().u8string() + ']' + (!compile_success ? " failed to compile" : "");
 
 		if (bool status = technique.enabled; ImGui::Checkbox(label.data(), &status))
 		{
