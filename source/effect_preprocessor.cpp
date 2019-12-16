@@ -3,6 +3,7 @@
  * License: https://github.com/crosire/reshade#license
  */
 
+#include "effect_lexer.hpp"
 #include "effect_preprocessor.hpp"
 #include <cassert>
 
@@ -97,6 +98,13 @@ static std::string escape_string(std::string s)
 	return s;
 }
 
+reshadefx::preprocessor::preprocessor()
+{
+}
+reshadefx::preprocessor::~preprocessor()
+{
+}
+
 void reshadefx::preprocessor::add_include_path(const std::filesystem::path &path)
 {
 	assert(!path.empty());
@@ -136,22 +144,6 @@ bool reshadefx::preprocessor::append_string(const std::string &source_code)
 	return _success;
 }
 
-std::vector<std::string> reshadefx::preprocessor::macro_ifdefs() const
-{
-	std::vector<std::string> defines;
-	defines.reserve(_macro_ifdefs.size());
-	for (const auto &it : _macro_ifdefs)
-		defines.push_back(it);
-	return defines;
-}
-std::vector<std::string> reshadefx::preprocessor::macro_definitions() const
-{
-	std::vector<std::string> defines;
-	defines.reserve(_macros.size());
-	for (const auto &it : _macros)
-		defines.push_back(it.first);
-	return defines;
-}
 std::vector<std::filesystem::path> reshadefx::preprocessor::included_files() const
 {
 	std::vector<std::filesystem::path> files;
@@ -159,6 +151,16 @@ std::vector<std::filesystem::path> reshadefx::preprocessor::included_files() con
 	for (const auto &it : _filecache)
 		files.push_back(std::filesystem::u8path(it.first));
 	return files;
+}
+std::vector<std::pair<std::string, std::string>> reshadefx::preprocessor::used_macro_definitions() const
+{
+	std::vector<std::pair<std::string, std::string>> defines;
+	defines.reserve(_used_macros.size());
+	for (const auto &name : _used_macros)
+		// Do not include function-like macros, since they are more likely to contain a complex replacement list
+		if (const auto it = _macros.find(name); it != _macros.end() && !it->second.is_function_like)
+			defines.push_back({ name, it->second.replacement_list });
+	return defines;
 }
 
 void reshadefx::preprocessor::error(const location &location, const std::string &message)
@@ -177,7 +179,7 @@ reshadefx::lexer &reshadefx::preprocessor::current_lexer()
 
 	return *_input_stack.back().lexer;
 }
-std::stack<reshadefx::preprocessor::if_level> &reshadefx::preprocessor::current_if_stack()
+std::vector<reshadefx::preprocessor::if_level> &reshadefx::preprocessor::current_if_stack()
 {
 	assert(!_input_stack.empty());
 
@@ -239,7 +241,7 @@ void reshadefx::preprocessor::consume()
 	while (_input_stack.back().next_token == tokenid::end_of_file)
 	{
 		if (!current_if_stack().empty())
-			error(current_if_stack().top().token.location, "unterminated #if");
+			error(current_if_stack().back().token.location, "unterminated #if");
 
 		_input_stack.pop_back();
 
@@ -300,7 +302,7 @@ void reshadefx::preprocessor::parse()
 	{
 		_recursion_count = 0;
 
-		const bool skip = !current_if_stack().empty() && current_if_stack().top().skipping;
+		const bool skip = !current_if_stack().empty() && current_if_stack().back().skipping;
 
 		consume();
 
@@ -387,6 +389,7 @@ void reshadefx::preprocessor::parse()
 		case tokenid::identifier:
 			if (evaluate_identifier_as_macro())
 				continue;
+			// fall through
 		default:
 			line += _current_token_raw_data;
 			break;
@@ -453,84 +456,88 @@ void reshadefx::preprocessor::parse_undef()
 
 void reshadefx::preprocessor::parse_if()
 {
+	const auto condition_token = _token;
 	const bool condition_result = evaluate_expression();
 
 	if_level level;
-	level.token = _token;
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	level.token = condition_token;
 	level.value = condition_result;
-	level.parent = current_if_stack().empty() ? nullptr : &current_if_stack().top();
-	level.skipping = (level.parent != nullptr && level.parent->skipping) || !level.value;
+	level.skipping = (!if_stack.empty() && if_stack.back().skipping) || !level.value;
 
-	current_if_stack().push(level);
+	if_stack.push_back(std::move(level));
 }
 void reshadefx::preprocessor::parse_ifdef()
 {
-	if_level level;
-	level.token = _token;
+	const auto condition_token = _token;
 
 	if (!expect(tokenid::identifier))
 		return;
 
+	if_level level;
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	level.token = condition_token;
 	level.value = _macros.find(_token.literal_as_string) != _macros.end();
-	level.parent = current_if_stack().empty() ? nullptr : &current_if_stack().top();
-	level.skipping = (level.parent != nullptr && level.parent->skipping) || !level.value;
+	level.skipping = (!if_stack.empty() && if_stack.back().skipping) || !level.value;
 
-	current_if_stack().push(level);
-	_macro_ifdefs.emplace(_token.literal_as_string);
+	if_stack.push_back(std::move(level));
+	_used_macros.emplace(_token.literal_as_string);
 }
 void reshadefx::preprocessor::parse_ifndef()
 {
-	if_level level;
-	level.token = _token;
+	const auto condition_token = _token;
 
 	if (!expect(tokenid::identifier))
 		return;
 
+	if_level level;
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	level.token = condition_token;
 	level.value = _macros.find(_token.literal_as_string) == _macros.end();
-	level.parent = current_if_stack().empty() ? nullptr : &current_if_stack().top();
-	level.skipping = (level.parent != nullptr && level.parent->skipping) || !level.value;
+	level.skipping = (!if_stack.empty() && if_stack.back().skipping) || !level.value;
 
-	current_if_stack().push(level);
-	_macro_ifdefs.emplace(_token.literal_as_string);
+	if_stack.push_back(std::move(level));
+	_used_macros.emplace(_token.literal_as_string);
 }
 void reshadefx::preprocessor::parse_elif()
 {
-	if (current_if_stack().empty())
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	if (if_stack.empty())
 		return error(_token.location, "missing #if for #elif");
 
-	if_level &level = current_if_stack().top();
-
+	if_level &level = if_stack.back();
 	if (level.token == tokenid::hash_else)
 		return error(_token.location, "#elif is not allowed after #else");
 
 	const bool condition_result = evaluate_expression();
 
 	level.token = _token;
-	level.skipping = (level.parent != nullptr && level.parent->skipping) || level.value || !condition_result;
+	level.skipping = (if_stack.size() > 1 && if_stack[if_stack.size() - 2].skipping) || level.value || !condition_result;
 
 	if (!level.value) level.value = condition_result;
 }
 void reshadefx::preprocessor::parse_else()
 {
-	if (current_if_stack().empty())
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	if (if_stack.empty())
 		return error(_token.location, "missing #if for #else");
 
-	if_level &level = current_if_stack().top();
-
+	if_level &level = if_stack.back();
 	if (level.token == tokenid::hash_else)
 		return error(_token.location, "#else is not allowed after #else");
 
 	level.token = _token;
-	level.skipping = (level.parent != nullptr && level.parent->skipping) || level.value;
+	level.skipping = (if_stack.size() > 1 && if_stack[if_stack.size() - 2].skipping) || level.value;
 
 	if (!level.value) level.value = true;
 }
 void reshadefx::preprocessor::parse_endif()
 {
-	if (current_if_stack().empty())
+	std::vector<if_level> &if_stack = _input_stack.back().if_stack;
+	if (if_stack.empty())
 		return error(_token.location, "missing #if for #endif");
 
-	current_if_stack().pop();
+	if_stack.pop_back();
 }
 
 void reshadefx::preprocessor::parse_error()

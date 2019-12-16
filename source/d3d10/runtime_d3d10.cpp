@@ -40,8 +40,6 @@ namespace reshade::d3d10
 		com_ptr<ID3D10Query> timestamp_query_end;
 		std::vector<com_ptr<ID3D10SamplerState>> sampler_states;
 		std::vector<com_ptr<ID3D10ShaderResourceView>> texture_bindings;
-		ptrdiff_t uniform_storage_index = -1;
-		ptrdiff_t uniform_storage_offset = 0;
 	};
 }
 
@@ -238,6 +236,7 @@ void reshade::d3d10::runtime_d3d10::on_reset()
 #endif
 
 #if RESHADE_DX10_CAPTURE_DEPTH_BUFFERS
+	_has_depth_texture = false;
 	_depth_texture_override = nullptr;
 #endif
 }
@@ -345,7 +344,7 @@ bool reshade::d3d10::runtime_d3d10::capture_screenshot(uint8_t *buffer) const
 		}
 		else
 		{
-			memcpy(buffer, mapped_data, pitch);
+			std::memcpy(buffer, mapped_data, pitch);
 
 			for (uint32_t x = 0; x < pitch; x += 4)
 			{
@@ -375,7 +374,7 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 		return false;
 	}
 
-	effect &effect = _loaded_effects[index];
+	effect &effect = _effects[index];
 
 	const auto D3DCompile = reinterpret_cast<pD3DCompile>(GetProcAddress(_d3d_compiler, "D3DCompile"));
 	const auto D3DDisassemble = reinterpret_cast<pD3DDisassemble>(GetProcAddress(_d3d_compiler, "D3DDisassemble"));
@@ -439,26 +438,23 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 		}
 	}
 
-	if (effect.storage_size != 0)
+	if (index >= _effect_constant_buffers.size())
+		_effect_constant_buffers.resize(index + 1);
+
+	if (!effect.uniform_data_storage.empty())
 	{
-		com_ptr<ID3D10Buffer> cbuffer;
+		const D3D10_BUFFER_DESC desc = { static_cast<UINT>(effect.uniform_data_storage.size()), D3D10_USAGE_DYNAMIC, D3D10_BIND_CONSTANT_BUFFER, D3D10_CPU_ACCESS_WRITE };
+		const D3D10_SUBRESOURCE_DATA init_data = { effect.uniform_data_storage.data(), desc.ByteWidth };
 
-		const D3D10_BUFFER_DESC desc = { static_cast<UINT>(effect.storage_size), D3D10_USAGE_DYNAMIC, D3D10_BIND_CONSTANT_BUFFER, D3D10_CPU_ACCESS_WRITE };
-		const D3D10_SUBRESOURCE_DATA init_data = { _uniform_data_storage.data() + effect.storage_offset, static_cast<UINT>(effect.storage_size) };
-
-		if (HRESULT hr = _device->CreateBuffer(&desc, &init_data, &cbuffer); FAILED(hr))
+		if (HRESULT hr = _device->CreateBuffer(&desc, &init_data, &_effect_constant_buffers[index]); FAILED(hr))
 		{
 			LOG(ERROR) << "Failed to create constant buffer for effect file " << effect.source_file << ". "
 				"HRESULT is " << hr << '.';
 			return false;
 		}
-
-		_effect_constant_buffers.push_back(std::move(cbuffer));
 	}
 
 	d3d10_technique_data technique_init;
-	technique_init.uniform_storage_index = _effect_constant_buffers.size() - 1;
-	technique_init.uniform_storage_offset = effect.storage_offset;
 
 	for (const reshadefx::sampler_info &info : effect.module.samplers)
 	{
@@ -729,6 +725,13 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 
 	return true;
 }
+void reshade::d3d10::runtime_d3d10::unload_effect(size_t index)
+{
+	runtime::unload_effect(index);
+
+	if (index < _effect_constant_buffers.size())
+		_effect_constant_buffers[index].reset();
+}
 void reshade::d3d10::runtime_d3d10::unload_effects()
 {
 	runtime::unload_effects();
@@ -740,17 +743,17 @@ void reshade::d3d10::runtime_d3d10::unload_effects()
 bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 {
 	texture.impl = std::make_unique<d3d10_tex_data>();
-	const auto texture_data = texture.impl->as<d3d10_tex_data>();
+	const auto impl = texture.impl->as<d3d10_tex_data>();
 
 	switch (texture.impl_reference)
 	{
 	case texture_reference::back_buffer:
-		texture_data->srv[0] = _backbuffer_texture_srv[0];
-		texture_data->srv[1] = _backbuffer_texture_srv[1];
+		impl->srv[0] = _backbuffer_texture_srv[0];
+		impl->srv[1] = _backbuffer_texture_srv[1];
 		return true;
 	case texture_reference::depth_buffer:
-		texture_data->srv[0] = _depth_texture_srv;
-		texture_data->srv[1] = _depth_texture_srv;
+		impl->srv[0] = _depth_texture_srv;
+		impl->srv[1] = _depth_texture_srv;
 		return true;
 	}
 
@@ -804,7 +807,7 @@ bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 		break;
 	}
 
-	if (HRESULT hr = _device->CreateTexture2D(&desc, nullptr, &texture_data->texture); FAILED(hr))
+	if (HRESULT hr = _device->CreateTexture2D(&desc, nullptr, &impl->texture); FAILED(hr))
 	{
 		LOG(ERROR) << "Failed to create texture '" << texture.unique_name << "' ("
 			"Width = " << desc.Width << ", "
@@ -819,7 +822,7 @@ bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 	srv_desc.ViewDimension = D3D10_SRV_DIMENSION_TEXTURE2D;
 	srv_desc.Texture2D.MipLevels = desc.MipLevels;
 
-	if (HRESULT hr = _device->CreateShaderResourceView(texture_data->texture.get(), &srv_desc, &texture_data->srv[0]); FAILED(hr))
+	if (HRESULT hr = _device->CreateShaderResourceView(impl->texture.get(), &srv_desc, &impl->srv[0]); FAILED(hr))
 	{
 		LOG(ERROR) << "Failed to create shader resource view for texture '" << texture.unique_name << "' ("
 			"Format = " << srv_desc.Format << ")! "
@@ -831,7 +834,7 @@ bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 
 	if (srv_desc.Format != desc.Format)
 	{
-		if (HRESULT hr = _device->CreateShaderResourceView(texture_data->texture.get(), &srv_desc, &texture_data->srv[1]); FAILED(hr))
+		if (HRESULT hr = _device->CreateShaderResourceView(impl->texture.get(), &srv_desc, &impl->srv[1]); FAILED(hr))
 		{
 			LOG(ERROR) << "Failed to create shader resource view for texture '" << texture.unique_name << "' ("
 				"Format = " << srv_desc.Format << ")! "
@@ -841,14 +844,15 @@ bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 	}
 	else
 	{
-		texture_data->srv[1] = texture_data->srv[0];
+		impl->srv[1] = impl->srv[0];
 	}
 
 	return true;
 }
 void reshade::d3d10::runtime_d3d10::upload_texture(texture &texture, const uint8_t *pixels)
 {
-	assert(texture.impl_reference == texture_reference::none && pixels != nullptr);
+	const auto impl = texture.impl->as<d3d10_tex_data>();
+	assert(impl != nullptr && texture.impl_reference == texture_reference::none && pixels != nullptr);
 
 	unsigned int upload_pitch;
 	std::vector<uint8_t> upload_data;
@@ -878,13 +882,10 @@ void reshade::d3d10::runtime_d3d10::upload_texture(texture &texture, const uint8
 		return;
 	}
 
-	const auto texture_impl = texture.impl->as<d3d10_tex_data>();
-	assert(texture_impl != nullptr);
-
-	_device->UpdateSubresource(texture_impl->texture.get(), 0, nullptr, pixels, upload_pitch, upload_pitch * texture.height);
+	_device->UpdateSubresource(impl->texture.get(), 0, nullptr, pixels, upload_pitch, upload_pitch * texture.height);
 
 	if (texture.levels > 1)
-		_device->GenerateMips(texture_impl->srv[0].get());
+		_device->GenerateMips(impl->srv[0].get());
 }
 
 void reshade::d3d10::runtime_d3d10::render_technique(technique &technique)
@@ -928,17 +929,16 @@ void reshade::d3d10::runtime_d3d10::render_technique(technique &technique)
 	_device->PSSetSamplers(0, static_cast<UINT>(technique_data.sampler_states.size()), reinterpret_cast<ID3D10SamplerState *const *>(technique_data.sampler_states.data()));
 
 	// Setup shader constants
-	if (technique_data.uniform_storage_index >= 0)
+	if (const auto constant_buffer = _effect_constant_buffers[technique.effect_index].get();
+		constant_buffer != nullptr)
 	{
-		const auto constant_buffer = _effect_constant_buffers[technique_data.uniform_storage_index].get();
-
 		void *mapped;
 		if (HRESULT hr = constant_buffer->Map(D3D10_MAP_WRITE_DISCARD, 0, &mapped); SUCCEEDED(hr))
 		{
 			D3D10_BUFFER_DESC desc = {};
 			constant_buffer->GetDesc(&desc);
 
-			memcpy(mapped, _uniform_data_storage.data() + technique_data.uniform_storage_offset, desc.ByteWidth);
+			std::memcpy(mapped, _effects[technique.effect_index].uniform_data_storage.data(), desc.ByteWidth);
 			constant_buffer->Unmap();
 		}
 		else
@@ -1166,8 +1166,8 @@ void reshade::d3d10::runtime_d3d10::render_imgui_draw_data(ImDrawData *draw_data
 	for (int n = 0; n < draw_data->CmdListsCount; ++n)
 	{
 		const ImDrawList *const draw_list = draw_data->CmdLists[n];
-		memcpy(idx_dst, draw_list->IdxBuffer.Data, draw_list->IdxBuffer.Size * sizeof(ImDrawIdx));
-		memcpy(vtx_dst, draw_list->VtxBuffer.Data, draw_list->VtxBuffer.Size * sizeof(ImDrawVert));
+		std::memcpy(idx_dst, draw_list->IdxBuffer.Data, draw_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+		std::memcpy(vtx_dst, draw_list->VtxBuffer.Data, draw_list->VtxBuffer.Size * sizeof(ImDrawVert));
 		idx_dst += draw_list->IdxBuffer.Size;
 		vtx_dst += draw_list->VtxBuffer.Size;
 	}
@@ -1220,12 +1220,11 @@ void reshade::d3d10::runtime_d3d10::render_imgui_draw_data(ImDrawData *draw_data
 				static_cast<const d3d10_tex_data *>(cmd.TextureId)->srv[0].get();
 			_device->PSSetShaderResources(0, 1, &texture_view);
 
-			_device->DrawIndexed(cmd.ElemCount, idx_offset, vtx_offset);
-
-			idx_offset += cmd.ElemCount;
+			_device->DrawIndexed(cmd.ElemCount, cmd.IdxOffset + idx_offset, cmd.VtxOffset + vtx_offset);
 		}
 
-		vtx_offset += draw_list->VtxBuffer.size();
+		idx_offset += draw_list->IdxBuffer.Size;
+		vtx_offset += draw_list->VtxBuffer.Size;
 	}
 }
 #endif
@@ -1251,7 +1250,7 @@ void reshade::d3d10::runtime_d3d10::draw_depth_debug_menu()
 		for (const auto &[dsv_texture, snapshot] : _current_tracker->depth_buffer_counters())
 		{
 			char label[512] = "";
-			sprintf_s(label, "%s0x%p", (dsv_texture == _depth_texture ? "> " : "  "), dsv_texture.get());
+			sprintf_s(label, "%s0x%p", (dsv_texture == _depth_texture || dsv_texture == _current_tracker->current_depth_texture() ? "> " : "  "), dsv_texture.get());
 
 			D3D10_TEXTURE2D_DESC desc;
 			dsv_texture->GetDesc(&desc);
@@ -1314,6 +1313,7 @@ void reshade::d3d10::runtime_d3d10::update_depthstencil_texture(com_ptr<ID3D10Te
 
 	_depth_texture = std::move(texture);
 	_depth_texture_srv.reset();
+	_has_depth_texture = false;
 
 	if (_depth_texture != nullptr)
 	{
@@ -1333,6 +1333,8 @@ void reshade::d3d10::runtime_d3d10::update_depthstencil_texture(com_ptr<ID3D10Te
 			return;
 		}
 	}
+
+	_has_depth_texture = true;
 
 	// Update all references to the new texture
 	for (auto &tex : _textures)

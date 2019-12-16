@@ -402,7 +402,10 @@ private:
 	}
 	id   define_uniform(const location &loc, uniform_info &info) override
 	{
-		info.size = info.type.rows * info.type.cols * std::max(1, info.type.array_length) * 4;
+		info.size = info.type.is_matrix() ? (info.type.rows - 1) * 16u + info.type.cols * 4 : info.type.rows * 4;
+		// Arrays are not packed in HLSL by default, each element is stored in a four-component vector
+		if (info.type.is_array())
+			info.size = std::max(16u, info.size) * info.type.array_length;
 
 		const id res = make_id();
 
@@ -425,12 +428,21 @@ private:
 		}
 		else
 		{
-			const uint32_t alignment = 16 - (_module.total_uniform_size % 16);
-			const uint32_t alignment_size = (info.size > alignment && (alignment != 16 || info.size <= 16)) ? info.size + alignment : info.size;
-			_module.total_uniform_size += alignment_size;
-			info.offset = _module.total_uniform_size - info.size; // Alignment is prepended to the offset 
+			// Data is packed into 4-byte boundaries (see https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-packing-rules)
+			// This is already guaranteed, since all types are at least 4-byte in size
+			info.offset = _module.total_uniform_size;
+			// Additionally HLSL packs data so that it does not cross a 16-byte boundary
+			const uint32_t remaining = 16 - (info.offset & 15);
+			if (remaining != 16 && info.size > remaining)
+				info.offset += remaining;
+			_module.total_uniform_size = info.offset + info.size;
 
 			write_location<true>(_cbuffer_block, loc);
+
+			if (_shader_model >= 40)
+				_cbuffer_block += '\t';
+			if (info.type.is_matrix()) // Force row major matrices
+				_cbuffer_block += "row_major ";
 
 			if (_shader_model < 40)
 			{
@@ -443,12 +455,12 @@ private:
 				info.offset *= 4;
 
 				// Every constant register is 16 bytes wide, so divide memory offset by 16 to get the constant register index
+				// Note: All uniforms are floating-point in shader model 3, even if the uniform type says different!!
 				write_type(_cbuffer_block, type);
 				_cbuffer_block += ' ' + id_to_name(res) + " : register(c" + std::to_string(info.offset / 16) + ");\n";
 			}
 			else
 			{
-				_cbuffer_block += '\t';
 				write_type(_cbuffer_block, info.type);
 				_cbuffer_block += ' ' + id_to_name(res) + ";\n";
 			}
@@ -902,13 +914,10 @@ private:
 	}
 	id   emit_ternary_op(const location &loc, tokenid op, const type &res_type, id condition, id true_value, id false_value) override
 	{
-		const id res = make_id();
-
 		if (op != tokenid::question)
-		{
-			assert(false); // Should never happen, since this is the only ternary operator currently supported
-			return res;
-		}
+			return assert(false), 0; // Should never happen, since this is the only ternary operator currently supported
+
+		const id res = make_id();
 
 		std::string &code = _blocks.at(_current_block);
 
