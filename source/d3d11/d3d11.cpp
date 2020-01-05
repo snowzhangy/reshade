@@ -89,7 +89,7 @@ HOOK_EXPORT HRESULT WINAPI D3D11CreateDeviceAndSwapChain(IDXGIAdapter *pAdapter,
 	else
 	{
 		// Change device to proxy for swap chain creation below
-		device = device_proxy = new D3D11Device(dxgi_device, device, device_context);
+		//device = device_proxy = new D3D11Device(dxgi_device, device, device_context);
 	}
 
 	// Swap chain creation is piped through the 'IDXGIFactory::CreateSwapChain' function hook
