@@ -1383,7 +1383,8 @@ void reshade::runtime::draw_ui_statistics()
 
 		for (const auto &texture : _textures)
 		{
-			if (!_effects[texture.effect_index].rendering || texture.impl == nullptr || texture.impl_reference != texture_reference::none)
+			//if (!_effects[texture.effect_index].rendering || texture.impl == nullptr || texture.impl_reference != texture_reference::none)
+			if ( texture.impl == nullptr)
 				continue;
 
 			ImGui::PushID(texture_index);

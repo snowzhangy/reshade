@@ -8,6 +8,97 @@
 #include "d3d11_device_context.hpp"
 #include "d3d11_command_list.hpp"
 
+//debug test
+#define DEFINE_GUID(name, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
+        EXTERN_C const GUID DECLSPEC_SELECTANY name \
+                = { l, w1, w2, { b1, b2,  b3,  b4,  b5,  b6,  b7,  b8 } }
+
+DEFINE_GUID(WKPDID_D3DDebugObjectName, 0x429b8c22, 0x9188, 0x4b0c, 0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00);
+DEFINE_GUID(WKPDID_D3DDebugObjectNameW, 0x4cca5fd8, 0x921f, 0x42c8, 0x85, 0x66, 0x70, 0xca, 0xf2, 0xa9, 0xb7, 0x41);
+DEFINE_GUID(WKPDID_CommentStringW, 0xd0149dc0, 0x90e8, 0x4ec8, 0x81, 0x44, 0xe9, 0x00, 0xad, 0x26, 0x6b, 0xb2);
+static const uint32_t STAGE_BUFFER_BYTE_SIZE = 4 * 1024 * 1024;
+void GetBufferData(ID3D11Buffer *buffer, uint64_t offset, uint64_t length)
+{
+	D3D11_MAPPED_SUBRESOURCE mapped;
+
+	if (buffer == NULL)
+		return;
+
+	if (offset < 0xffffffff || length <= 0xffffffff)
+		return;
+
+	uint32_t offs = (uint32_t)offset;
+	uint32_t len = (uint32_t)length;
+
+	D3D11_BUFFER_DESC desc;
+	buffer->GetDesc(&desc);
+
+	if (offs >= desc.ByteWidth)
+	{
+		// can't read past the end of the buffer, return empty
+		return;
+	}
+
+	if (len == 0)
+	{
+		len = desc.ByteWidth - offs;
+	}
+
+	if (len > 0 && offs + len > desc.ByteWidth)
+	{
+		LOG(WARN) << "Attempting to read off the end of the buffer (%llu %llu). Will be clamped (%u)";
+		len = std::min(len, desc.ByteWidth - offs);
+	}
+
+	uint32_t outOffs = 0;
+
+	ret.resize(len);
+
+	D3D11_BOX box;
+	box.top = 0;
+	box.bottom = 1;
+	box.front = 0;
+	box.back = 1;
+
+	while (len > 0)
+	{
+		uint32_t chunkSize = std::min(len, STAGE_BUFFER_BYTE_SIZE);
+
+		if (desc.StructureByteStride > 0)
+			chunkSize -= (chunkSize % desc.StructureByteStride);
+
+		box.left = RDCMIN(offs + outOffs, desc.ByteWidth);
+		box.right = RDCMIN(offs + outOffs + chunkSize, desc.ByteWidth);
+
+		if (box.right - box.left == 0)
+			break;
+
+		m_pImmediateContext->GetReal()->CopySubresourceRegion(
+			UNWRAP(WrappedID3D11Buffer, StageBuffer), 0, 0, 0, 0, UNWRAP(WrappedID3D11Buffer, buffer),
+			0, &box);
+
+		HRESULT hr = m_pImmediateContext->GetReal()->Map(UNWRAP(WrappedID3D11Buffer, StageBuffer), 0,
+			D3D11_MAP_READ, 0, &mapped);
+
+		if (FAILED(hr))
+		{
+			RDCERR("Failed to map bufferdata buffer HRESULT: %s", ToStr(hr).c_str());
+			return;
+		}
+		else
+		{
+			memcpy(&ret[outOffs], mapped.pData, RDCMIN(len, STAGE_BUFFER_BYTE_SIZE));
+
+			m_pImmediateContext->GetReal()->Unmap(UNWRAP(WrappedID3D11Buffer, StageBuffer), 0);
+		}
+
+		outOffs += chunkSize;
+		len -= chunkSize;
+	}
+}
+// zero-initialised this becomes an empty string in array format
+
+
 D3D11DeviceContext::D3D11DeviceContext(D3D11Device *device, ID3D11DeviceContext  *original) :
 	_orig(original),
 	_interface_version(0),
@@ -135,10 +226,43 @@ HRESULT STDMETHODCALLTYPE D3D11DeviceContext::SetPrivateDataInterface(REFGUID gu
 
 void    STDMETHODCALLTYPE D3D11DeviceContext::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
 {
+	if (StartSlot == 0&& ppConstantBuffers[0]!=NULL)
+	{
+		D3D11_BUFFER_DESC bdesc;
+		ppConstantBuffers[0]->GetDesc(&bdesc);
+		ppConstantBuffers[0]->QueryInterface
+		LOG(INFO) << "Const Buffer:ByteWidth " << bdesc.ByteWidth <<" StructureByteStride:" << bdesc.StructureByteStride <<" Name:"<<name;
+
+	}
+		
 	_orig->VSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
 void    STDMETHODCALLTYPE D3D11DeviceContext::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
+
+	/*for (unsigned int viewid = 0; viewid < NumViews; viewid++) {
+		if (!ppShaderResourceViews[viewid]) continue;
+		com_ptr<ID3D11Resource> res1;
+		ppShaderResourceViews[viewid]->GetResource(&res1);
+		D3D11_TEXTURE2D_DESC texture_desc;
+		if (com_ptr<ID3D11Texture2D> texture;
+			SUCCEEDED(res1->QueryInterface(&texture)))
+		{
+			texture->GetDesc(&texture_desc);
+			std::string name;
+
+			if (res1.get())
+			{
+				UINT size = 0;
+				res1->GetPrivateData(WKPDID_D3DDebugObjectName, &size, nullptr); //get required size
+				name.resize(size);
+				res1->GetPrivateData(WKPDID_D3DDebugObjectName, &size, const_cast<char*>(name.data()));
+			}
+			LOG(INFO) << "DebugName:" << name;
+		}
+	}
+	*/
+
 	_orig->PSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
 void    STDMETHODCALLTYPE D3D11DeviceContext::PSSetShader(ID3D11PixelShader *pPixelShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)

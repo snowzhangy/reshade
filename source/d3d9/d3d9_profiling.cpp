@@ -4,13 +4,14 @@
  */
 
 #include "hook_manager.hpp"
+#include "dll_log.hpp"
 #include <d3d9.h>
 
 HOOK_EXPORT int WINAPI D3DPERF_BeginEvent(D3DCOLOR col, LPCWSTR wszName)
 {
 	UNREFERENCED_PARAMETER(col);
 	UNREFERENCED_PARAMETER(wszName);
-
+	//LOG(INFO) << "Event Name:"<< wszName;
 	return 0;
 }
 HOOK_EXPORT int WINAPI D3DPERF_EndEvent()
@@ -22,11 +23,13 @@ HOOK_EXPORT void WINAPI D3DPERF_SetMarker(D3DCOLOR col, LPCWSTR wszName)
 {
 	UNREFERENCED_PARAMETER(col);
 	UNREFERENCED_PARAMETER(wszName);
+	//LOG(INFO) << "	Marker Name:" << wszName;
 }
 HOOK_EXPORT void WINAPI D3DPERF_SetRegion(D3DCOLOR col, LPCWSTR wszName)
 {
 	UNREFERENCED_PARAMETER(col);
 	UNREFERENCED_PARAMETER(wszName);
+	//LOG(INFO) << "	Region Name:" << wszName;
 }
 HOOK_EXPORT void WINAPI D3DPERF_SetOptions(DWORD dwOptions)
 {

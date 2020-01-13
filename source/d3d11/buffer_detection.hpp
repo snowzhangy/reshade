@@ -10,7 +10,7 @@
 #include "com_ptr.hpp"
 
 #define RESHADE_DX11_CAPTURE_DEPTH_BUFFERS 1
-#define RESHADE_DX11_CAPTURE_CONSTANT_BUFFERS 0
+#define RESHADE_DX11_CAPTURE_CONSTANT_BUFFERS 1
 
 namespace reshade::d3d11
 {
